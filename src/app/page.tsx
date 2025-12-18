@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { GeminiModel, getGeminiResponse } from "@/lib/gemini";
 import { Streamdown } from "streamdown";
+import { transcribeAudio } from "@/app/actions";
 import styles from "./page.module.css";
 
 const MODELS: { id: GeminiModel; label: string }[] = [
@@ -237,37 +238,35 @@ export default function CluleyApp() {
         }
       };
 
-      mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = async () => {
-          const base64Audio = reader.result as string;
-          setIsTranscribing(true);
-          try {
-            // Enhanced prompt with Context Injection
-            const contextPrompt = transcriptionContext
-              ? `Context: ${transcriptionContext}. `
-              : "";
+      // Stop all tracks immediately
+      stream.getTracks().forEach(track => track.stop());
 
-            const text = await getGeminiResponse(
-              `${contextPrompt}Transcribe this audio precisely. Identify speakers if possible. Format it clearly.`,
-              model,
-              undefined,
-              base64Audio,
-              apiKey
-            );
-            setTranscription(prev => prev + "\n" + (text || ""));
-          } catch (e) {
-            console.error("Transcription error", e);
-          } finally {
-            setIsTranscribing(false);
-          }
-        };
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
 
-        // Stop all tracks
-        stream.getTracks().forEach(track => track.stop());
-      };
+      setIsTranscribing(true);
+      try {
+        const formData = new FormData();
+        formData.append("audio", audioBlob);
+        formData.append("apiKey", apiKey);
+        formData.append("model", model);
+        if (transcriptionContext) {
+          formData.append("context", transcriptionContext);
+        }
+
+        const result = await transcribeAudio(formData);
+
+        if (result.success && result.text) {
+          setTranscription(prev => prev + "\n" + result.text);
+        } else {
+          console.error("Transcription failed:", result.error);
+          setTranscription(prev => prev + "\n[Error: Transcription failed - " + result.error + "]");
+        }
+      } catch (e) {
+        console.error("Transcription error", e);
+        setTranscription(prev => prev + "\n[Error: Transcription exception]");
+      } finally {
+        setIsTranscribing(false);
+      }
 
       mediaRecorderRef.current.start();
       setIsRecording(true);
