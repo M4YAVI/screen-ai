@@ -3,32 +3,12 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Home as HomeIcon,
-  MessageSquare,
-  Wand2,
-  HelpCircle,
-  Search,
-  RefreshCw,
-  ChevronDown,
-  Pause,
-  Square,
-  GripVertical,
-  X,
-  Send,
-  Sparkles,
-  Maximize2,
-  Copy,
-  Settings,
-  Key,
-  Save,
-  Trash2,
-  Camera,
-  Globe,
-  Plus,
-  Edit2,
-  Command
+  Home as HomeIcon, MessageSquare, Wand2, Send, Sparkles, X, Settings, GripVertical,
+  Maximize2, Minimize2, Copy, ChevronDown, Pause, Square, Camera, Globe, Plus, Edit2,
+  Trash2, Command, Save, Key, Mic, Download
 } from "lucide-react";
 import { GeminiModel, getGeminiResponse } from "@/lib/gemini";
+import { Streamdown } from "streamdown";
 import styles from "./page.module.css";
 
 const MODELS: { id: GeminiModel; label: string }[] = [
@@ -71,7 +51,6 @@ export default function CluleyApp() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<{ role: "user" | "ai"; content: string }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
   const [useGrounding, setUseGrounding] = useState(false);
   const [useScreenContext, setUseScreenContext] = useState(true); // Default ON
 
@@ -142,17 +121,7 @@ export default function CluleyApp() {
 
 
 
-  // Global Keyboard Shortcut: Ctrl + /
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === "/") {
-        e.preventDefault();
-        setIsVisible(prev => !prev);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+
 
   // Drag handlers
   const handleDragStart = (e: React.MouseEvent) => {
@@ -209,6 +178,112 @@ export default function CluleyApp() {
 
   // ...
 
+  // Audio Recording State
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcription, setTranscription] = useState("");
+  const [transcriptionContext, setTranscriptionContext] = useState(""); // User context
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Mini Mode State
+  const [isMiniMode, setIsMiniMode] = useState(false);
+
+  const handleStartRecording = async () => {
+    try {
+      // @ts-ignore
+      const sourceId = await window.electron.invoke('get-screen-source-id');
+      if (!sourceId) {
+        console.error("No screen source ID found");
+        return;
+      }
+
+      // setActiveTab("transcript"); // Optional: Auto-switch to transcript if desired, but user wants manual control mostly 
+      // setIsMiniMode(true); // REMOVED: User wants manual control
+      setActiveTab("transcript"); // Keep this if we want to show the transcript tab at least
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          // @ts-ignore
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sourceId
+          }
+        },
+        video: {
+          // @ts-ignore
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sourceId,
+            maxWidth: 100,
+            maxHeight: 100,
+            frameRate: 1
+          }
+        }
+      });
+
+      // We only need the audio
+      const audioTrack = stream.getAudioTracks()[0];
+      const audioStream = new MediaStream([audioTrack]);
+
+      streamRef.current = stream; // Keep ref to stop later
+      mediaRecorderRef.current = new MediaRecorder(audioStream, { mimeType: 'audio/webm; codecs=opus' });
+      audioChunksRef.current = [];
+
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorderRef.current.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = async () => {
+          const base64Audio = reader.result as string;
+          setIsTranscribing(true);
+          try {
+            // Enhanced prompt with Context Injection
+            const contextPrompt = transcriptionContext
+              ? `Context: ${transcriptionContext}. `
+              : "";
+
+            const text = await getGeminiResponse(
+              `${contextPrompt}Transcribe this audio precisely. Identify speakers if possible. Format it clearly.`,
+              model,
+              undefined,
+              base64Audio,
+              apiKey
+            );
+            setTranscription(prev => prev + "\n" + (text || ""));
+          } catch (e) {
+            console.error("Transcription error", e);
+          } finally {
+            setIsTranscribing(false);
+          }
+        };
+
+        // Stop all tracks
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorderRef.current.start();
+      setIsRecording(true);
+
+    } catch (err) {
+      console.error("Failed to start recording:", err);
+    }
+  };
+
+  const handleStopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
   const handleSend = async () => {
     // If no input and no screen context and no pill, do nothing
     if (!input.trim() && !useScreenContext && !activePill) return;
@@ -259,12 +334,20 @@ export default function CluleyApp() {
     setActivePill(null); // Clear pill after sending
 
     try {
+      // Map existing messages to Gemini history format
+      const history = messages.map(m => ({
+        role: (m.role === "user" ? "user" : "model") as "user" | "model",
+        parts: [{ text: m.content }]
+      }));
+
       const response = await getGeminiResponse(
         finalInput,
         model,
         currentScreenshot || undefined,
+        undefined, // audioData
         apiKey,
-        useGrounding
+        useGrounding,
+        history // Pass history
       );
       setMessages(prev => [...prev, { role: "ai", content: response }]);
     } catch (error) {
@@ -275,11 +358,68 @@ export default function CluleyApp() {
   };
 
 
-  if (!isVisible) {
+
+
+  if (isMiniMode) {
     return (
-      <div className={styles.hiddenHint}>
-        <span>Press <kbd>Ctrl</kbd> + <kbd>/</kbd> to show Cluely</span>
-      </div>
+      <main className={styles.overlay}>
+        <motion.div
+          className={styles.miniBar}
+          style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          onMouseDown={handleDragStart} /* Drag anywhere */
+        >
+          {/* Chat Toggle */}
+          <button
+            className={styles.controlBtn}
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsMiniMode(false);
+              setActiveTab("chat");
+            }}
+            onMouseDown={(e) => e.stopPropagation()} // Prevent drag conflict
+            title="Open Chat"
+          >
+            <MessageSquare size={16} />
+          </button>
+
+          {/* Recording Control */}
+          <button
+            className={`${styles.controlBtn} ${isRecording ? styles.recordingActive : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isRecording) {
+                handleStopRecording();
+              } else {
+                handleStartRecording();
+              }
+            }}
+            onMouseDown={(e) => e.stopPropagation()} // Prevent drag conflict
+            title={isRecording ? "Stop Recording" : "Start Recording"}
+          >
+            {isRecording ? <Square size={14} fill="#ff4d4d" color="#ff4d4d" /> : <Mic size={16} />}
+          </button>
+
+          {/* Drag Handle (Visual Only now, since whole bar is draggable) */}
+          <div className={styles.dragHandle} style={{ cursor: "grab" }}>
+            <GripVertical size={16} />
+          </div>
+
+          {/* Expand / Restore */}
+          <button
+            className={styles.controlBtn}
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsMiniMode(false);
+            }}
+            onMouseDown={(e) => e.stopPropagation()} // Prevent drag conflict
+            title="Expand"
+          >
+            <Maximize2 size={16} />
+          </button>
+        </motion.div>
+      </main>
     );
   }
 
@@ -329,13 +469,17 @@ export default function CluleyApp() {
           {/* Recording Controls */}
           <div className={styles.recordingControls}>
             <button
-              className={`${styles.controlBtn} ${isRecording ? styles.active : ""}`}
-              onClick={() => setIsRecording(!isRecording)}
+              className={`${styles.controlBtn} ${isRecording ? styles.recordingActive : ""}`}
+              onClick={() => {
+                if (isRecording) {
+                  handleStopRecording();
+                } else {
+                  handleStartRecording();
+                }
+              }}
+              title={isRecording ? "Stop Recording" : "Record System Audio"}
             >
-              <Pause size={16} />
-            </button>
-            <button className={styles.controlBtn}>
-              <Square size={14} />
+              {isRecording ? <Square size={14} fill="#ff4d4d" color="#ff4d4d" /> : <Mic size={16} />}
             </button>
           </div>
 
@@ -394,145 +538,239 @@ export default function CluleyApp() {
                 </button>
               </div>
             </div>
-            <button className={styles.expandBtn}>
-              <Maximize2 size={14} />
+            <button
+              className={styles.expandBtn}
+              onClick={() => setIsMiniMode(true)}
+              title="Mini Mode"
+            >
+              <Minimize2 size={14} />
             </button>
           </div>
 
-          {/* Messages */}
-          <div className={styles.messagesArea}>
-            {messages.length === 0 ? (
-              <div className={styles.emptyChat}>
-                <p>Ask about your screen or conversation, or press ↵ for Assist</p>
-              </div>
-            ) : (
-              messages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`${styles.message} ${msg.role === "user" ? styles.userMsg : styles.aiMsg}`}
-                >
-                  {msg.role === "user" && (
-                    <div className={styles.userBubble}>{msg.content}</div>
-                  )}
-                  {msg.role === "ai" && (
-                    <div className={styles.aiContent}>
-                      <div className={styles.aiText}>{msg.content}</div>
-                      <button className={styles.copyBtn}>
-                        <Copy size={14} />
-                      </button>
+          {/* Main Content Area */}
+          {activeTab === "transcript" ? (
+            <div className={styles.messagesArea}>
+              <div className={styles.transcriptContainer}>
+                {/* Transcript Toolbar */}
+                <div className={styles.transcriptToolbar}>
+                  <div className={styles.transcriptInfo}>
+                    <span className={styles.transcriptLabel}>
+                      {isTranscribing ? "Transcribing..." : "Live Transcript"}
+                    </span>
+                    <input
+                      type="text"
+                      className={styles.contextInput}
+                      placeholder="Add context (e.g. Anime Name, Meeting Topic)"
+                      value={transcriptionContext}
+                      onChange={(e) => setTranscriptionContext(e.target.value)}
+                    />
+                  </div>
+                  <div className={styles.transcriptActions}>
+                    <button
+                      className={styles.transcriptBtn}
+                      onClick={() => {
+                        if (transcription) {
+                          navigator.clipboard.writeText(transcription);
+                          alert("Copied to clipboard!");
+                        }
+                      }}
+                      title="Copy"
+                    >
+                      <Copy size={14} />
+                    </button>
+                    <button
+                      className={styles.transcriptBtn}
+                      onClick={() => {
+                        if (transcription) {
+                          const blob = new Blob([transcription], { type: "text/plain" });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `transcript-${new Date().toISOString().slice(0, 19)}.txt`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }
+                      }}
+                      title="Save as .txt"
+                    >
+                      <Download size={14} />
+                    </button>
+                    <button
+                      className={styles.transcriptBtn}
+                      onClick={() => setTranscription("")}
+                      title="Clear"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                {isTranscribing && (
+                  <div className={styles.transcribingIndicator}>
+                    <Sparkles size={14} className={styles.spin} />
+                    <span>Processing audio...</span>
+                  </div>
+                )}
+
+                {transcription ? (
+                  <div className={styles.transcriptPaper}>
+                    <pre className={styles.transcriptText}>{transcription}</pre>
+                  </div>
+                ) : (
+                  <div className={styles.emptyChat}>
+                    <div className={styles.emptyStateContent}>
+                      <Mic size={32} style={{ opacity: 0.3, marginBottom: 12 }} />
+                      <p>Record system audio to generate a transcript.</p>
                     </div>
-                  )}
-                </div>
-              ))
-            )}
-            {isLoading && (
-              <div className={styles.loadingMsg}>
-                <div className={styles.typingIndicator}>
-                  <span></span><span></span><span></span>
-                </div>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            /* Messages */
+            <div className={styles.messagesArea}>
+              {messages.length === 0 ? (
+                <div className={styles.emptyChat}>
+                  <p>Ask about your screen or conversation, or press ↵ for Assist</p>
+                </div>
+              ) : (
+                messages.map((msg, i) => (
+                  <div
+                    key={i}
+                    className={`${styles.message} ${msg.role === "user" ? styles.userMsg : styles.aiMsg}`}
+                  >
+                    {msg.role === "user" && (
+                      <div className={styles.userBubble}>{msg.content}</div>
+                    )}
+                    {msg.role === "ai" && (
+                      <div className={styles.aiContent}>
+                        <div className={`${styles.aiText} markdown-body`}>
+                          <Streamdown>{msg.content}</Streamdown>
+                        </div>
+                        <button
+                          className={styles.copyBtn}
+                          onClick={() => navigator.clipboard.writeText(msg.content)}
+                        >
+                          <Copy size={14} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+              {isLoading && (
+                <div className={styles.loadingMsg}>
+                  <div className={styles.typingIndicator}>
+                    <span></span><span></span><span></span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Quick Actions */}
-          <div className={styles.quickActions}>
-            <button
-              className={`${styles.quickAction} ${useScreenContext ? styles.active : ""}`}
-              onClick={() => setUseScreenContext(!useScreenContext)}
-            >
-              <Camera size={14} />
-              <span>{useScreenContext ? "Screen Context: ON" : "Screen Context: OFF"}</span>
-            </button>
-            <button
-              className={`${styles.quickAction} ${useGrounding ? styles.active : ""}`}
-              onClick={() => setUseGrounding(!useGrounding)}
-            >
-              <Globe size={14} />
-              <span>{useGrounding ? "Grounding: ON" : "Grounding: OFF"}</span>
-            </button>
-          </div>
-
-          {/* Input Area */}
-          <div className={styles.inputArea}>
-            {/* Pill Container (if active) */}
-            {activePill && (
-              <div className={styles.pillContainer}>
-                <div className={styles.badgePill}>
-                  <Sparkles size={10} />
-                  <span>/{activePill.name}</span>
-                  <button onClick={() => setActivePill(null)}><X size={10} /></button>
-                </div>
-              </div>
-            )}
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => {
-                const val = e.target.value;
-                setInput(val);
-                if (val.startsWith("/")) {
-                  setShowSlashMenu(true);
-                } else {
-                  setShowSlashMenu(false);
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSend();
-                // Close menu on escape
-                if (e.key === "Escape") setShowSlashMenu(false);
-                // Backspace removes pill if input empty
-                if (e.key === "Backspace" && input === "" && activePill) {
-                  setActivePill(null);
-                }
-              }}
-              placeholder={activePill ? "Type your prompt..." : "Click to type, or / for commands"}
-              className={styles.textInput}
-            />
-            {showSlashMenu && (
-              <div className={styles.slashMenu}>
-                <div className={styles.slashHeader}>
-                  <span>Shortcuts</span>
-                  <button
-                    className={styles.addCmdBtn}
-                    onClick={() => { setShowSlashMenu(false); setShowCommandModal(true); }}
-                  >
-                    <Plus size={14} />
-                  </button>
-                </div>
-                <div className={styles.slashList}>
-                  {slashCommands.map(cmd => (
-                    <div
-                      key={cmd.id}
-                      className={styles.slashItem}
-                      onClick={() => handleSlashSelect(cmd)}
-                    >
-                      <div className={styles.slashContent}>
-                        <span className={styles.cmdName}>/{cmd.name}</span>
-                        <span className={styles.cmdDesc}>{cmd.description}</span>
-                      </div>
-                      <div className={styles.slashActions}>
-                        <button onClick={(e) => openEditModal(cmd, e)}>
-                          <Edit2 size={12} />
-                        </button>
-                        <button onClick={(e) => handleDeleteCommand(cmd.id, e)}>
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div className={styles.inputActions}>
-              <div className={styles.modelIndicator}>
-                <Sparkles size={12} />
-                <span>Smart</span>
-              </div>
-              <button className={styles.sendBtn} onClick={handleSend}>
-                <Send size={16} />
+          {activeTab === "chat" && (
+            <div className={styles.quickActions}>
+              <button
+                className={`${styles.quickAction} ${useScreenContext ? styles.active : ""}`}
+                onClick={() => setUseScreenContext(!useScreenContext)}
+              >
+                <Camera size={14} />
+                <span>{useScreenContext ? "Screen Context: ON" : "Screen Context: OFF"}</span>
+              </button>
+              <button
+                className={`${styles.quickAction} ${useGrounding ? styles.active : ""}`}
+                onClick={() => setUseGrounding(!useGrounding)}
+              >
+                <Globe size={14} />
+                <span>{useGrounding ? "Grounding: ON" : "Grounding: OFF"}</span>
               </button>
             </div>
-          </div>
+          )}
+
+          {/* Input Area */}
+          {activeTab === "chat" && (
+            <div className={styles.inputArea}>
+              {/* Pill Container (if active) */}
+              {activePill && (
+                <div className={styles.pillContainer}>
+                  <div className={styles.badgePill}>
+                    <Sparkles size={10} />
+                    <span>/{activePill.name}</span>
+                    <button onClick={() => setActivePill(null)}><X size={10} /></button>
+                  </div>
+                </div>
+              )}
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setInput(val);
+                  if (val.startsWith("/")) {
+                    setShowSlashMenu(true);
+                  } else {
+                    setShowSlashMenu(false);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSend();
+                  // Close menu on escape
+                  if (e.key === "Escape") setShowSlashMenu(false);
+                  // Backspace removes pill if input empty
+                  if (e.key === "Backspace" && input === "" && activePill) {
+                    setActivePill(null);
+                  }
+                }}
+                placeholder={activePill ? "Type your prompt..." : "Click to type, or / for commands"}
+                className={styles.textInput}
+              />
+              {showSlashMenu && (
+                <div className={styles.slashMenu}>
+                  <div className={styles.slashHeader}>
+                    <span>Shortcuts</span>
+                    <button
+                      className={styles.addCmdBtn}
+                      onClick={() => { setShowSlashMenu(false); setShowCommandModal(true); }}
+                    >
+                      <Plus size={14} />
+                    </button>
+                  </div>
+                  <div className={styles.slashList}>
+                    {slashCommands.map(cmd => (
+                      <div
+                        key={cmd.id}
+                        className={styles.slashItem}
+                        onClick={() => handleSlashSelect(cmd)}
+                      >
+                        <div className={styles.slashContent}>
+                          <span className={styles.cmdName}>/{cmd.name}</span>
+                          <span className={styles.cmdDesc}>{cmd.description}</span>
+                        </div>
+                        <div className={styles.slashActions}>
+                          <button onClick={(e) => openEditModal(cmd, e)}>
+                            <Edit2 size={12} />
+                          </button>
+                          <button onClick={(e) => handleDeleteCommand(cmd.id, e)}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className={styles.inputActions}>
+                <div className={styles.modelIndicator}>
+                  <Sparkles size={12} />
+                  <span>Smart</span>
+                </div>
+                <button className={styles.sendBtn} onClick={handleSend}>
+                  <Send size={16} />
+                </button>
+              </div>
+            </div>
+          )}
         </motion.div>
       </div >
 

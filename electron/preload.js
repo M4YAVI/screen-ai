@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('electron', {
         }
     },
     invoke: (channel, data) => {
-        let validChannels = ['capture-screen'];
+        let validChannels = ['capture-screen', 'get-screen-source-id'];
         if (validChannels.includes(channel)) {
             return ipcRenderer.invoke(channel, data);
         }

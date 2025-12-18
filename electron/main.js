@@ -101,3 +101,13 @@ ipcMain.handle('capture-screen', async () => {
     return null;
   }
 });
+
+ipcMain.handle('get-screen-source-id', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    return sources[0] ? sources[0].id : null;
+  } catch (error) {
+    console.error("Failed to get screen source ID:", error);
+    return null;
+  }
+});

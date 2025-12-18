@@ -8,10 +8,12 @@ export type GeminiModel =
 
 export async function getGeminiResponse(
     prompt: string,
-    modelName: GeminiModel = "gemini-2.0-flash",
+    modelName: GeminiModel = "gemini-2.5-flash",
     imageData?: string, // Base64 image
+    audioData?: string, // Base64 audio
     apiKey?: string,
-    useGrounding: boolean = false
+    useGrounding: boolean = false,
+    history: { role: "user" | "model"; parts: { text: string }[] }[] = []
 ) {
     try {
         const finalKey = apiKey || process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
@@ -20,28 +22,42 @@ export async function getGeminiResponse(
         const genAI = new GoogleGenerativeAI(finalKey);
 
         // Define tools if grounding is requested
-        // @ts-ignore - The types for tools might be slightly different in this version
-        const tools = useGrounding ? [{ googleSearch: {} }] : [];
+        // @ts-ignore
+        const tools: any = useGrounding ? [{ googleSearch: {} }] : [];
 
         const model = genAI.getGenerativeModel({
             model: modelName,
-            tools: tools // Add tools configuration
+            tools: tools
         });
 
+        const chat = model.startChat({
+            history: history,
+            generationConfig: {
+                maxOutputTokens: 8000,
+            },
+        });
+
+        const parts: any[] = [{ text: prompt }];
+
         if (imageData) {
-            const result = await model.generateContent([
-                prompt,
-                {
-                    inlineData: {
-                        data: imageData.split(",")[1] || imageData,
-                        mimeType: "image/png", // Changed to png as electron usually captures png
-                    },
+            parts.push({
+                inlineData: {
+                    data: imageData.split(",")[1] || imageData,
+                    mimeType: "image/png",
                 },
-            ]);
-            return result.response.text();
+            });
         }
 
-        const result = await model.generateContent(prompt);
+        if (audioData) {
+            parts.push({
+                inlineData: {
+                    data: audioData.split(",")[1] || audioData,
+                    mimeType: "audio/webm; codecs=opus", // Common web recording format
+                },
+            });
+        }
+
+        const result = await chat.sendMessage(parts);
         return result.response.text();
     } catch (error) {
         console.error("Gemini API Error:", error);
