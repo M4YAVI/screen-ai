@@ -14,6 +14,13 @@ contextBridge.exposeInMainWorld('electron', {
             // Deliberately strip event as it includes `sender` 
             ipcRenderer.on(channel, (event, ...args) => func(...args));
         }
+    },
+    invoke: (channel, data) => {
+        let validChannels = ['capture-screen'];
+        if (validChannels.includes(channel)) {
+            return ipcRenderer.invoke(channel, data);
+        }
+        return Promise.reject(new Error(`Invalid channel: ${channel}`));
     }
 });
 

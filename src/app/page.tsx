@@ -21,46 +21,126 @@ import {
   Settings,
   Key,
   Save,
-  Trash2
+  Trash2,
+  Camera,
+  Globe,
+  Plus,
+  Edit2,
+  Command
 } from "lucide-react";
 import { GeminiModel, getGeminiResponse } from "@/lib/gemini";
 import styles from "./page.module.css";
 
 const MODELS: { id: GeminiModel; label: string }[] = [
-  { id: "gemini-2.0-flash", label: "2.0 Flash" },
   { id: "gemini-2.5-flash", label: "2.5 Flash" },
   { id: "gemini-2.5-flash-lite", label: "2.5 Lite" },
   { id: "gemini-3-flash", label: "3.0 Flash" },
 ];
 
+interface SlashCommand {
+  id: string;
+  name: string;
+  description: string;
+}
+
+const DEFAULT_COMMANDS: SlashCommand[] = [
+  { id: "1", name: "super-thinker", description: "Think deeply about this problem step-by-step." },
+  { id: "2", name: "smart-friend", description: "Explain this like a supportive and intelligent friend." },
+];
+
 export default function CluleyApp() {
   const [isVisible, setIsVisible] = useState(true);
-  const [model, setModel] = useState<GeminiModel>("gemini-2.0-flash");
+  const [model, setModel] = useState<GeminiModel>("gemini-2.5-flash"); // Fixed default
+  // ... existing state
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+
+  // Slash Command State
+  const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(DEFAULT_COMMANDS);
+  const [showSlashMenu, setShowSlashMenu] = useState(false);
+  const [showCommandModal, setShowCommandModal] = useState(false);
+  const [activePill, setActivePill] = useState<SlashCommand | null>(null);
+  const [editingCommand, setEditingCommand] = useState<SlashCommand | null>(null);
+  const [newCommandName, setNewCommandName] = useState("");
+  const [newCommandDesc, setNewCommandDesc] = useState("");
+
   const [apiKey, setApiKey] = useState("");
+
   const [tempApiKey, setTempApiKey] = useState("");
   const [activeTab, setActiveTab] = useState<"chat" | "transcript">("chat");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<{ role: "user" | "ai"; content: string }[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [useGrounding, setUseGrounding] = useState(false);
+  const [useScreenContext, setUseScreenContext] = useState(true); // Default ON
 
   // Drag state
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const dragRef = useRef<{ startX: number; startY: number; initialX: number; initialY: number } | null>(null);
 
-  // Load API Key
+  // Load Commands
   useEffect(() => {
-    const savedKey = localStorage.getItem("gemini_api_key");
-    if (savedKey) {
-      setApiKey(savedKey);
-      setTempApiKey(savedKey);
-    } else {
-      setShowSettings(true);
+    const saved = localStorage.getItem("cluely_commands");
+    if (saved) {
+      setSlashCommands(JSON.parse(saved));
     }
   }, []);
+
+  // Save Commands
+  useEffect(() => {
+    localStorage.setItem("cluely_commands", JSON.stringify(slashCommands));
+  }, [slashCommands]);
+
+  const handleAddCommand = () => {
+    if (!newCommandName.trim() || !newCommandDesc.trim()) return;
+
+    if (editingCommand) {
+      setSlashCommands(prev => prev.map(c =>
+        c.id === editingCommand.id
+          ? { ...c, name: newCommandName, description: newCommandDesc }
+          : c
+      ));
+    } else {
+      const newCmd: SlashCommand = {
+        id: Date.now().toString(),
+        name: newCommandName.startsWith("/") ? newCommandName.slice(1) : newCommandName,
+        description: newCommandDesc
+      };
+      setSlashCommands(prev => [...prev, newCmd]);
+    }
+
+    closeCommandModal();
+  };
+
+  const handleDeleteCommand = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSlashCommands(prev => prev.filter(c => c.id !== id));
+  };
+
+  const openEditModal = (cmd: SlashCommand, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingCommand(cmd);
+    setNewCommandName(cmd.name);
+    setNewCommandDesc(cmd.description);
+    setShowCommandModal(true);
+  };
+
+  const closeCommandModal = () => {
+    setShowCommandModal(false);
+    setEditingCommand(null);
+    setNewCommandName("");
+    setNewCommandDesc("");
+  };
+
+  const handleSlashSelect = (cmd: SlashCommand) => {
+    setActivePill(cmd);
+    setInput("");
+    setShowSlashMenu(false);
+  };
+
+
 
   // Global Keyboard Shortcut: Ctrl + /
   useEffect(() => {
@@ -124,29 +204,76 @@ export default function CluleyApp() {
     localStorage.removeItem("gemini_api_key");
   };
 
+  // ...
+  const [screenshot, setScreenshot] = useState<string | null>(null);
+
+  // ...
+
   const handleSend = async () => {
-    if (!input.trim()) return;
+    // If no input and no screen context and no pill, do nothing
+    if (!input.trim() && !useScreenContext && !activePill) return;
+
+    // Check API Key
     if (!apiKey) {
       setShowSettings(true);
       return;
     }
 
-    const userMsg = { role: "user" as const, content: input };
-    setMessages(prev => [...prev, userMsg]);
-    setInput("");
+    let finalInput = input.trim();
+
+    // Prepend Pill Prompt if active
+    if (activePill) {
+      // If input is empty, just use the prompt
+      if (!finalInput) {
+        finalInput = activePill.description;
+      } else {
+        finalInput = `${activePill.description}\n\n${finalInput}`;
+      }
+    }
+
+    // If strictly image mode (no text), provide a default prompt
+    if (!finalInput && useScreenContext) {
+      finalInput = "Analyze this screen and tell me what you see.";
+    }
+
+    const userMsg = { role: "user" as const, content: finalInput };
+
     setIsLoading(true);
 
-    const response = await getGeminiResponse(input, model, undefined, apiKey);
-    setMessages(prev => [...prev, { role: "ai", content: response }]);
-    setIsLoading(false);
+    // Capture screen if enabled
+    let currentScreenshot = null;
+    if (useScreenContext) {
+      try {
+        // @ts-ignore
+        currentScreenshot = await window.electron.invoke('capture-screen');
+        if (currentScreenshot) {
+          userMsg.content = "[Screen Context] " + userMsg.content;
+        }
+      } catch (err) {
+        console.error("Auto-capture failed:", err);
+      }
+    }
+
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    setActivePill(null); // Clear pill after sending
+
+    try {
+      const response = await getGeminiResponse(
+        finalInput,
+        model,
+        currentScreenshot || undefined,
+        apiKey,
+        useGrounding
+      );
+      setMessages(prev => [...prev, { role: "ai", content: response }]);
+    } catch (error) {
+      setMessages(prev => [...prev, { role: "ai", content: "Error: Could not get response." }]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const quickActions = [
-    { icon: Wand2, label: "What should I say?" },
-    { icon: HelpCircle, label: "Follow-up questions" },
-    { icon: Search, label: "Fact-check" },
-    { icon: RefreshCw, label: "Recap" },
-  ];
 
   if (!isVisible) {
     return (
@@ -309,24 +436,93 @@ export default function CluleyApp() {
 
           {/* Quick Actions */}
           <div className={styles.quickActions}>
-            {quickActions.map((action, i) => (
-              <button key={i} className={styles.quickAction}>
-                <action.icon size={14} />
-                <span>{action.label}</span>
-              </button>
-            ))}
+            <button
+              className={`${styles.quickAction} ${useScreenContext ? styles.active : ""}`}
+              onClick={() => setUseScreenContext(!useScreenContext)}
+            >
+              <Camera size={14} />
+              <span>{useScreenContext ? "Screen Context: ON" : "Screen Context: OFF"}</span>
+            </button>
+            <button
+              className={`${styles.quickAction} ${useGrounding ? styles.active : ""}`}
+              onClick={() => setUseGrounding(!useGrounding)}
+            >
+              <Globe size={14} />
+              <span>{useGrounding ? "Grounding: ON" : "Grounding: OFF"}</span>
+            </button>
           </div>
 
           {/* Input Area */}
           <div className={styles.inputArea}>
+            {/* Pill Container (if active) */}
+            {activePill && (
+              <div className={styles.pillContainer}>
+                <div className={styles.badgePill}>
+                  <Sparkles size={10} />
+                  <span>/{activePill.name}</span>
+                  <button onClick={() => setActivePill(null)}><X size={10} /></button>
+                </div>
+              </div>
+            )}
             <input
               type="text"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleSend()}
-              placeholder="Click to type, or ↑ ↵ for assist"
+              onChange={(e) => {
+                const val = e.target.value;
+                setInput(val);
+                if (val.startsWith("/")) {
+                  setShowSlashMenu(true);
+                } else {
+                  setShowSlashMenu(false);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSend();
+                // Close menu on escape
+                if (e.key === "Escape") setShowSlashMenu(false);
+                // Backspace removes pill if input empty
+                if (e.key === "Backspace" && input === "" && activePill) {
+                  setActivePill(null);
+                }
+              }}
+              placeholder={activePill ? "Type your prompt..." : "Click to type, or / for commands"}
               className={styles.textInput}
             />
+            {showSlashMenu && (
+              <div className={styles.slashMenu}>
+                <div className={styles.slashHeader}>
+                  <span>Shortcuts</span>
+                  <button
+                    className={styles.addCmdBtn}
+                    onClick={() => { setShowSlashMenu(false); setShowCommandModal(true); }}
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+                <div className={styles.slashList}>
+                  {slashCommands.map(cmd => (
+                    <div
+                      key={cmd.id}
+                      className={styles.slashItem}
+                      onClick={() => handleSlashSelect(cmd)}
+                    >
+                      <div className={styles.slashContent}>
+                        <span className={styles.cmdName}>/{cmd.name}</span>
+                        <span className={styles.cmdDesc}>{cmd.description}</span>
+                      </div>
+                      <div className={styles.slashActions}>
+                        <button onClick={(e) => openEditModal(cmd, e)}>
+                          <Edit2 size={12} />
+                        </button>
+                        <button onClick={(e) => handleDeleteCommand(cmd.id, e)}>
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className={styles.inputActions}>
               <div className={styles.modelIndicator}>
                 <Sparkles size={12} />
@@ -338,64 +534,121 @@ export default function CluleyApp() {
             </div>
           </div>
         </motion.div>
-      </div>
+      </div >
 
-      {/* Settings Modal */}
+      {/* Command Modal */}
       <AnimatePresence>
-        {showSettings && (
-          <motion.div
-            className={styles.modalOverlay}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={() => setShowSettings(false)}
-          >
+        {
+          showCommandModal && (
             <motion.div
-              className={styles.settingsModal}
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
+              className={styles.modalOverlay}
+              // reuse existing modal styles or create new ones
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={closeCommandModal}
             >
-              <div className={styles.modalHeader}>
-                <div className={styles.modalTitle}>
-                  <Key size={18} />
-                  <h3>Settings</h3>
+              <motion.div
+                className={styles.settingsModal} // Reusing settings modal style for consistency
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className={styles.modalHeader}>
+                  <div className={styles.modalTitle}>
+                    <Command size={18} />
+                    <h3>{editingCommand ? "Edit Shortcut" : "New Shortcut"}</h3>
+                  </div>
+                  <button className={styles.modalClose} onClick={closeCommandModal}>
+                    <X size={18} />
+                  </button>
                 </div>
-                <button
-                  className={styles.modalClose}
-                  onClick={() => setShowSettings(false)}
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className={styles.modalBody}>
-                <label>Gemini API Key</label>
-                <input
-                  type="password"
-                  value={tempApiKey}
-                  onChange={(e) => setTempApiKey(e.target.value)}
-                  placeholder="Enter your API key..."
-                  className={styles.apiInput}
-                />
-                <p className={styles.apiHint}>Your key is stored locally and never shared.</p>
-              </div>
-
-              <div className={styles.modalFooter}>
-                <button className={styles.clearBtn} onClick={handleClearApiKey}>
-                  <Trash2 size={14} />
-                  <span>Clear</span>
-                </button>
-                <button className={styles.saveBtn} onClick={handleSaveApiKey}>
-                  <Save size={14} />
-                  <span>Save</span>
-                </button>
-              </div>
+                <div className={styles.modalBody}>
+                  <label>Shortcut Name (e.g. fix-code)</label>
+                  <input
+                    className={styles.apiInput}
+                    value={newCommandName}
+                    onChange={(e) => setNewCommandName(e.target.value)}
+                    placeholder="command-name"
+                  />
+                  <label style={{ marginTop: 12 }}>Prompt Instructions</label>
+                  <textarea
+                    className={styles.apiInput}
+                    style={{ minHeight: 100, resize: 'vertical' }}
+                    value={newCommandDesc}
+                    onChange={(e) => setNewCommandDesc(e.target.value)}
+                    placeholder="What should this command do?"
+                  />
+                </div>
+                <div className={styles.modalFooter}>
+                  <button className={styles.saveBtn} onClick={handleAddCommand}>
+                    <Save size={14} />
+                    <span>Save Shortcut</span>
+                  </button>
+                </div>
+              </motion.div>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </main>
+          )
+        }
+      </AnimatePresence >
+
+      {/* Settings Modal (Existing) */}
+      <AnimatePresence>
+
+        {
+          showSettings && (
+            <motion.div
+              className={styles.modalOverlay}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowSettings(false)}
+            >
+              <motion.div
+                className={styles.settingsModal}
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className={styles.modalHeader}>
+                  <div className={styles.modalTitle}>
+                    <Key size={18} />
+                    <h3>Settings</h3>
+                  </div>
+                  <button
+                    className={styles.modalClose}
+                    onClick={() => setShowSettings(false)}
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className={styles.modalBody}>
+                  <label>Gemini API Key</label>
+                  <input
+                    type="password"
+                    value={tempApiKey}
+                    onChange={(e) => setTempApiKey(e.target.value)}
+                    placeholder="Enter your API key..."
+                    className={styles.apiInput}
+                  />
+                  <p className={styles.apiHint}>Your key is stored locally and never shared.</p>
+                </div>
+
+                <div className={styles.modalFooter}>
+                  <button className={styles.clearBtn} onClick={handleClearApiKey}>
+                    <Trash2 size={14} />
+                    <span>Clear</span>
+                  </button>
+                  <button className={styles.saveBtn} onClick={handleSaveApiKey}>
+                    <Save size={14} />
+                    <span>Save</span>
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )
+        }
+      </AnimatePresence >
+    </main >
   );
 }

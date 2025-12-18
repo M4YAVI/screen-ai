@@ -10,14 +10,23 @@ export async function getGeminiResponse(
     prompt: string,
     modelName: GeminiModel = "gemini-2.0-flash",
     imageData?: string, // Base64 image
-    apiKey?: string
+    apiKey?: string,
+    useGrounding: boolean = false
 ) {
     try {
         const finalKey = apiKey || process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
         if (!finalKey) throw new Error("API Key is missing");
 
         const genAI = new GoogleGenerativeAI(finalKey);
-        const model = genAI.getGenerativeModel({ model: modelName });
+
+        // Define tools if grounding is requested
+        // @ts-ignore - The types for tools might be slightly different in this version
+        const tools = useGrounding ? [{ googleSearch: {} }] : [];
+
+        const model = genAI.getGenerativeModel({
+            model: modelName,
+            tools: tools // Add tools configuration
+        });
 
         if (imageData) {
             const result = await model.generateContent([
@@ -25,7 +34,7 @@ export async function getGeminiResponse(
                 {
                     inlineData: {
                         data: imageData.split(",")[1] || imageData,
-                        mimeType: "image/jpeg",
+                        mimeType: "image/png", // Changed to png as electron usually captures png
                     },
                 },
             ]);
@@ -39,3 +48,4 @@ export async function getGeminiResponse(
         return "Error generating response. Please check your API key and model selection.";
     }
 }
+

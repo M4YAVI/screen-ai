@@ -77,8 +77,27 @@ app.on('window-all-closed', () => {
   }
 });
 
+const { desktopCapturer } = require('electron');
+
+// ... (previous code)
+
 // IPC handlers for futuristic features
 ipcMain.handle('capture-screen', async () => {
-  // Logic for screenshot capture will go here
-  return "Capture success (mock)";
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1920, height: 1080 }
+    });
+
+    // Get the primary screen (usually the first one)
+    const primarySource = sources[0];
+
+    if (primarySource) {
+      return primarySource.thumbnail.toDataURL(); // Returns base64 image
+    }
+    return null;
+  } catch (error) {
+    console.error("Screen capture failed:", error);
+    return null;
+  }
 });
